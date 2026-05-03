@@ -46,15 +46,12 @@ def run_health_server():
     server.serve_forever()
 
 # ==========================================
-# PROGRESS BAR
+# PROGRESS BAR HELPER
 # ==========================================
-def make_progress_bar(current, total):
-    percent = int((current / total) * 100) if total else 0
+def make_progress_bar(percent):
     filled = int(percent / 10)
     bar = "█" * filled + "░" * (10 - filled)
-    size_done = round(current / (1024 * 1024), 1)
-    size_total = round(total / (1024 * 1024), 1)
-    return f"[{bar}] {percent}%\n📦 {size_done} MB / {size_total} MB"
+    return f"[{bar}] {percent}%"
 
 last_update_time = {}
 
@@ -66,11 +63,103 @@ async def progress(current, total, message, action):
     if now - last_update_time[user_id] < 2:
         return
     last_update_time[user_id] = now
-    bar = make_progress_bar(current, total)
+    percent = int((current / total) * 100) if total else 0
+    size_done = round(current / (1024 * 1024), 1)
+    size_total = round(total / (1024 * 1024), 1)
+    bar = make_progress_bar(percent)
     try:
-        await message.edit_text(f"{action}\n{bar}")
+        await message.edit_text(
+            f"{action}\n{bar}\n"
+            f"📦 {size_done} MB / {size_total} MB"
+        )
     except:
         pass
+
+# ==========================================
+# FFMPEG CONVERSION PROGRESS
+# ==========================================
+async def convert_with_progress(command, duration_secs, status_msg):
+    """
+    Reads FFmpeg stderr in real time to show
+    conversion progress based on time position
+    """
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+
+    last_update = 0
+    stderr_lines = []
+
+    # Read stderr line by line for progress
+    while True:
+        line = await process.stderr.readline()
+        if not line:
+            break
+
+        line = line.decode('utf-8', errors='ignore').strip()
+        stderr_lines.append(line)
+
+        # FFmpeg outputs time= in stderr during conversion
+        if 'time=' in line:
+            try:
+                # Extract time from FFmpeg output
+                # Format: time=HH:MM:SS.xx
+                time_part = line.split('time=')[1].split(' ')[0]
+                parts = time_part.split(':')
+                if len(parts) == 3:
+                    h = float(parts[0])
+                    m = float(parts[1])
+                    s = float(parts[2])
+                    current_secs = h * 3600 + m * 60 + s
+
+                    percent = min(
+                        int((current_secs / duration_secs) * 100),
+                        99
+                    ) if duration_secs > 0 else 0
+
+                    now = time.time()
+                    # Update every 3 seconds
+                    if now - last_update >= 3:
+                        last_update = now
+                        bar = make_progress_bar(percent)
+                        elapsed = round(now - last_update, 1)
+                        try:
+                            await status_msg.edit_text(
+                                f"🔄 **Converting to AAC M4A...**\n"
+                                f"{bar}\n"
+                                f"⏱ {time_part} / "
+                                f"{int(duration_secs//3600):02}:"
+                                f"{int((duration_secs%3600)//60):02}:"
+                                f"{int(duration_secs%60):02}"
+                            )
+                        except:
+                            pass
+            except:
+                pass
+
+    await process.wait()
+    return process.returncode, b''.join(
+        [l.encode() for l in stderr_lines])
+
+# ==========================================
+# GET AUDIO DURATION USING FFPROBE
+# ==========================================
+async def get_duration(file_path):
+    try:
+        probe = await asyncio.create_subprocess_exec(
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            file_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        stdout, _ = await probe.communicate()
+        return float(stdout.decode().strip())
+    except:
+        return 0
 
 # ==========================================
 # SETTINGS
@@ -107,6 +196,7 @@ async def start_cmd(client, message):
         "👋 **Welcome to Audio Converter Bot!**\n\n"
         "🎵 Send any audio or video file\n"
         "⚡ Fast download + conversion\n"
+        "📊 Real-time progress bar\n"
         "📤 Get M4A back instantly\n\n"
         "📌 /help — How to use\n"
         "⚙️ /settings — Change quality"
@@ -118,7 +208,7 @@ async def help_cmd(client, message):
         "🛠 **How to use:**\n\n"
         "1️⃣ Send or forward any audio/video file\n"
         f"2️⃣ Supported: {', '.join(SUPPORTED_FORMATS).upper()}\n"
-        "3️⃣ Watch the progress bar\n"
+        "3️⃣ Watch the real-time progress bar\n"
         "4️⃣ Get your M4A file!\n\n"
         "📦 Max file size: **2GB**\n"
         "✅ 5.1 Surround → Clear Stereo fix included\n"
@@ -184,7 +274,7 @@ async def handle_files(client, message):
         f"[░░░░░░░░░░] 0%"
     )
 
-    # ✅ FIXED - Use message.id for clean file path
+    # Clean safe file paths
     safe_id = str(message.id)
     input_path = f"/tmp/input_{safe_id}.{ext}"
     output_path = f"/tmp/output_{safe_id}.m4a"
@@ -201,14 +291,19 @@ async def handle_files(client, message):
         )
 
         dl_time = round(time.time() - start_time, 1)
+
+        # Get audio duration for progress calculation
+        duration = await get_duration(input_path)
+
         await status_msg.edit_text(
             f"✅ Downloaded in {dl_time}s\n"
             f"🔄 **Converting to AAC M4A...**\n"
-            f"[██████████] Please wait..."
+            f"[░░░░░░░░░░] 0%\n"
+            f"⏱ Starting..."
         )
 
         # ==========================================
-        # 2. FFMPEG CONVERT
+        # 2. CONVERT WITH REAL PROGRESS BAR
         # ==========================================
         settings = get_user_settings(message.from_user.id)
 
@@ -219,29 +314,24 @@ async def handle_files(client, message):
             '-c:a', 'aac',
             '-b:a', settings['bitrate'],
             '-ac', '2',
-            # ✅ 5.1 Surround voice fix
-            '-af', 'pan=stereo|FL=FC+0.707*FL+0.707*BL|FR=FC+0.707*FR+0.707*BR',
+            '-af', 'pan=stereo|FL=FC+0.707*FL'
+                   '+0.707*BL|FR=FC+0.707*FR+0.707*BR',
             '-ar', settings['ar'],
             '-vn',
             '-movflags', '+faststart',
+            # Enable progress output
+            '-progress', 'pipe:1',
             output_path
         ]
 
         conv_start = time.time()
+        returncode, stderr = await convert_with_progress(
+            command, duration, status_msg)
 
-        # Capture FFmpeg errors for debugging
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
-
-        if process.returncode != 0:
-            error_msg = stderr.decode()[-500:]
+        if returncode != 0:
+            error_msg = stderr.decode('utf-8', errors='ignore')[-500:]
             await status_msg.edit_text(
-                f"❌ **FFmpeg Error:**\n"
-                f"`{error_msg}`\n\n"
+                f"❌ **FFmpeg Error:**\n`{error_msg}`\n\n"
                 "Please try again."
             )
             return
@@ -297,10 +387,8 @@ async def handle_files(client, message):
 # BOT START
 # ==========================================
 if __name__ == '__main__':
-    # Start Render health check server
     health_thread = threading.Thread(
         target=run_health_server, daemon=True)
     health_thread.start()
-
     print("🤖 Bot is starting...")
     app.run()
