@@ -6,6 +6,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+# ==========================================
+# CONFIGURATION
+# ==========================================
 API_ID = "20288994"
 API_HASH = "d702614912f1ad370a0d18786002adbf"
 BOT_TOKEN = "8610998423:AAGAneW7hmfW8kUP_FUCXjjb_jl5_BQXUQA"
@@ -26,7 +29,7 @@ USER_SETTINGS = {}
 last_update_time = {}
 
 # ==========================================
-# HEALTH SERVER
+# HEALTH SERVER FOR RENDER
 # ==========================================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -99,7 +102,7 @@ async def start_cmd(client, message):
         "👋 **Welcome to Audio Converter Bot!**\n\n"
         "🎵 Send any audio or video file\n"
         "⚡ Fast download + conversion\n"
-        "📊 Progress bar included\n"
+        "📊 Real progress bar\n"
         "📤 Get M4A back instantly\n\n"
         "📌 /help — How to use\n"
         "⚙️ /settings — Change quality"
@@ -141,53 +144,6 @@ async def toggle(client, cq):
     await cq.answer("✅ Updated!")
 
 # ==========================================
-# CONVERSION PROGRESS READER
-# ==========================================
-async def run_ffmpeg_with_progress(cmd, duration, status_msg):
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE
-    )
-
-    last_update = 0
-    error_lines = []
-
-    while True:
-        line = await process.stderr.readline()
-        if not line:
-            break
-        line = line.decode('utf-8', errors='ignore').strip()
-        error_lines.append(line)
-
-        # Parse FFmpeg time= from stderr
-        if 'time=' in line and duration > 0:
-            try:
-                t = line.split('time=')[1].split(' ')[0]
-                h, m, s = t.split(':')
-                current = float(h)*3600 + float(m)*60 + float(s)
-                pct = min(int((current / duration) * 100), 99)
-                now = time.time()
-                if now - last_update >= 3:
-                    last_update = now
-                    elapsed = round(now - last_update, 1)
-                    cur_str = f"{int(float(h)):02}:{int(float(m)):02}:{int(float(s)):02}"
-                    dur_str = f"{int(duration//3600):02}:{int((duration%3600)//60):02}:{int(duration%60):02}"
-                    try:
-                        await status_msg.edit_text(
-                            f"🔄 **Converting to AAC M4A...**\n"
-                            f"[{make_bar(pct)}] {pct}%\n"
-                            f"⏱ {cur_str} / {dur_str}"
-                        )
-                    except:
-                        pass
-            except:
-                pass
-
-    await process.wait()
-    return process.returncode, '\n'.join(error_lines[-20:])
-
-# ==========================================
 # GET DURATION
 # ==========================================
 async def get_duration(path):
@@ -206,6 +162,84 @@ async def get_duration(path):
         return 0
 
 # ==========================================
+# FFMPEG WITH REAL PROGRESS
+# ==========================================
+async def run_ffmpeg_with_progress(cmd, duration, status_msg):
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT
+    )
+
+    last_update = 0
+    error_lines = []
+    buffer = ""
+
+    while True:
+        try:
+            # Read small chunks - fixes separator error
+            chunk = await process.stdout.read(512)
+            if not chunk:
+                break
+
+            buffer += chunk.decode('utf-8', errors='ignore')
+
+            # FFmpeg uses \r not \n for progress
+            while '\r' in buffer or '\n' in buffer:
+                sep = '\r' if '\r' in buffer else '\n'
+                line, buffer = buffer.split(sep, 1)
+                line = line.strip()
+                if not line:
+                    continue
+
+                error_lines.append(line)
+
+                # Parse time= for real progress
+                if 'time=' in line and duration > 0:
+                    try:
+                        t = line.split('time=')[1].split(' ')[0]
+                        if ':' in t and t[0] != '-':
+                            h, m, s = t.split(':')
+                            current = (
+                                float(h) * 3600 +
+                                float(m) * 60 +
+                                float(s)
+                            )
+                            pct = min(
+                                int((current / duration) * 100),
+                                99
+                            )
+                            now = time.time()
+                            if now - last_update >= 3:
+                                last_update = now
+                                cur_str = (
+                                    f"{int(float(h)):02}:"
+                                    f"{int(float(m)):02}:"
+                                    f"{int(float(s)):02}"
+                                )
+                                dur_str = (
+                                    f"{int(duration//3600):02}:"
+                                    f"{int((duration%3600)//60):02}:"
+                                    f"{int(duration%60):02}"
+                                )
+                                try:
+                                    await status_msg.edit_text(
+                                        f"🔄 **Converting to AAC M4A...**\n"
+                                        f"[{make_bar(pct)}] {pct}%\n"
+                                        f"⏱ {cur_str} / {dur_str}"
+                                    )
+                                except:
+                                    pass
+                    except:
+                        pass
+
+        except Exception:
+            break
+
+    await process.wait()
+    return process.returncode, '\n'.join(error_lines[-20:])
+
+# ==========================================
 # MAIN FILE HANDLER
 # ==========================================
 @app.on_message(filters.audio | filters.video | filters.document)
@@ -218,7 +252,8 @@ async def handle_file(client, message):
     if ext not in SUPPORTED_FORMATS:
         await message.reply_text(
             "❌ **Unsupported format!**\n"
-            f"✅ Supported: {', '.join(SUPPORTED_FORMATS).upper()}")
+            f"✅ Supported: {', '.join(SUPPORTED_FORMATS).upper()}"
+        )
         return
 
     if file_size > MAX_FILE_SIZE:
@@ -238,7 +273,9 @@ async def handle_file(client, message):
     t0 = time.time()
 
     try:
-        # 1. DOWNLOAD
+        # ==========================================
+        # 1. DOWNLOAD WITH PROGRESS
+        # ==========================================
         await message.download(
             file_name=inp,
             progress=progress,
@@ -246,7 +283,7 @@ async def handle_file(client, message):
         )
         dl_time = round(time.time() - t0, 1)
 
-        # 2. GET DURATION
+        # Get duration for progress calculation
         duration = await get_duration(inp)
 
         await status.edit_text(
@@ -256,8 +293,11 @@ async def handle_file(client, message):
             f"⏱ Starting..."
         )
 
-        # 3. CONVERT - NO -progress flag, reads stderr
+        # ==========================================
+        # 2. CONVERT WITH REAL PROGRESS
+        # ==========================================
         s = get_settings(message.from_user.id)
+
         cmd = [
             'ffmpeg', '-y',
             '-i', inp,
@@ -265,7 +305,12 @@ async def handle_file(client, message):
             '-c:a', 'aac',
             '-b:a', s['bitrate'],
             '-ac', '2',
-            '-af', 'pan=stereo|FL=FC+0.707*FL+0.707*BL|FR=FC+0.707*FR+0.707*BR',
+            # Fix 5.1 voice loss
+            '-af', (
+                'pan=stereo|'
+                'FL=FC+0.707*FL+0.707*BL|'
+                'FR=FC+0.707*FR+0.707*BR'
+            ),
             '-ar', s['ar'],
             '-vn',
             '-movflags', '+faststart',
@@ -273,11 +318,14 @@ async def handle_file(client, message):
         ]
 
         ct0 = time.time()
-        rc, err = await run_ffmpeg_with_progress(cmd, duration, status)
+        rc, err = await run_ffmpeg_with_progress(
+            cmd, duration, status)
 
         if rc != 0:
             await status.edit_text(
-                f"❌ **FFmpeg Error:**\n`{err[-300:]}`")
+                f"❌ **FFmpeg Error:**\n`{err[-300:]}`\n\n"
+                "Please try again."
+            )
             return
 
         conv_time = round(time.time() - ct0, 1)
@@ -291,16 +339,20 @@ async def handle_file(client, message):
             f"📦 {out_mb} MB"
         )
 
-        # 4. UPLOAD
+        # ==========================================
+        # 3. UPLOAD WITH PROGRESS
+        # ==========================================
         await message.reply_audio(
             audio=out,
             title=file_name.rsplit('.', 1)[0] + '.m4a',
             caption=(
-                f"✅ **Done!**\n\n"
-                f"🎵 AAC M4A\n"
-                f"🎚 {s['bitrate']} | {s['ar']} Hz | Stereo\n"
-                f"📦 {out_mb} MB\n"
-                f"⏱ {total_time}s total"
+                f"✅ **Converted Successfully!**\n\n"
+                f"🎵 Format: AAC M4A\n"
+                f"🎚 Bitrate: {s['bitrate']}\n"
+                f"🎚 Sample Rate: {s['ar']} Hz\n"
+                f"🔊 Channels: Stereo\n"
+                f"📦 Size: {out_mb} MB\n"
+                f"⏱ Total: {total_time}s"
             ),
             progress=progress,
             progress_args=(status, "⬆️ **Uploading...**")
@@ -308,7 +360,10 @@ async def handle_file(client, message):
         await status.delete()
 
     except Exception as e:
-        await status.edit_text(f"❌ **Error:** {str(e)}")
+        await status.edit_text(
+            f"❌ **Error:** {str(e)}\n"
+            "Please try again."
+        )
 
     finally:
         for f in [inp, out]:
@@ -322,5 +377,5 @@ async def handle_file(client, message):
 if __name__ == '__main__':
     threading.Thread(
         target=run_health_server, daemon=True).start()
-    print("🤖 Starting bot...")
+    print("🤖 Bot starting...")
     app.run()
