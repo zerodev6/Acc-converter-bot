@@ -6,9 +6,6 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
 API_ID = "20288994"
 API_HASH = "d702614912f1ad370a0d18786002adbf"
 BOT_TOKEN = "8610998423:AAGAneW7hmfW8kUP_FUCXjjb_jl5_BQXUQA"
@@ -25,146 +22,53 @@ SUPPORTED_FORMATS = [
     'eac3', 'ac3', 'dts', 'mp3', 'flac', 'wav',
     'ogg', 'opus', 'wma', 'aac', 'mkv', 'mp4', 'avi'
 ]
-
 USER_SETTINGS = {}
+last_update_time = {}
 
 # ==========================================
-# RENDER HEALTH CHECK SERVER
+# HEALTH SERVER
 # ==========================================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is running!")
+        self.wfile.write(b"OK")
     def log_message(self, format, *args):
         pass
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    print(f"✅ Health server running on port {port}")
-    server.serve_forever()
+    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
 # ==========================================
-# PROGRESS BAR HELPER
+# PROGRESS BAR
 # ==========================================
-def make_progress_bar(percent):
+def make_bar(percent):
     filled = int(percent / 10)
-    bar = "█" * filled + "░" * (10 - filled)
-    return f"[{bar}] {percent}%"
+    return "█" * filled + "░" * (10 - filled)
 
-last_update_time = {}
-
-async def progress(current, total, message, action):
-    user_id = message.id
+async def progress(current, total, status_msg, action):
     now = time.time()
-    if user_id not in last_update_time:
-        last_update_time[user_id] = 0
-    if now - last_update_time[user_id] < 2:
+    uid = status_msg.id
+    if now - last_update_time.get(uid, 0) < 2:
         return
-    last_update_time[user_id] = now
-    percent = int((current / total) * 100) if total else 0
-    size_done = round(current / (1024 * 1024), 1)
-    size_total = round(total / (1024 * 1024), 1)
-    bar = make_progress_bar(percent)
+    last_update_time[uid] = now
+    pct = int((current / total) * 100) if total else 0
+    done = round(current / 1024 / 1024, 1)
+    total_mb = round(total / 1024 / 1024, 1)
     try:
-        await message.edit_text(
-            f"{action}\n{bar}\n"
-            f"📦 {size_done} MB / {size_total} MB"
+        await status_msg.edit_text(
+            f"{action}\n"
+            f"[{make_bar(pct)}] {pct}%\n"
+            f"📦 {done} MB / {total_mb} MB"
         )
     except:
         pass
 
 # ==========================================
-# FFMPEG CONVERSION PROGRESS
-# ==========================================
-async def convert_with_progress(command, duration_secs, status_msg):
-    """
-    Reads FFmpeg stderr in real time to show
-    conversion progress based on time position
-    """
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-
-    last_update = 0
-    stderr_lines = []
-
-    # Read stderr line by line for progress
-    while True:
-        line = await process.stderr.readline()
-        if not line:
-            break
-
-        line = line.decode('utf-8', errors='ignore').strip()
-        stderr_lines.append(line)
-
-        # FFmpeg outputs time= in stderr during conversion
-        if 'time=' in line:
-            try:
-                # Extract time from FFmpeg output
-                # Format: time=HH:MM:SS.xx
-                time_part = line.split('time=')[1].split(' ')[0]
-                parts = time_part.split(':')
-                if len(parts) == 3:
-                    h = float(parts[0])
-                    m = float(parts[1])
-                    s = float(parts[2])
-                    current_secs = h * 3600 + m * 60 + s
-
-                    percent = min(
-                        int((current_secs / duration_secs) * 100),
-                        99
-                    ) if duration_secs > 0 else 0
-
-                    now = time.time()
-                    # Update every 3 seconds
-                    if now - last_update >= 3:
-                        last_update = now
-                        bar = make_progress_bar(percent)
-                        elapsed = round(now - last_update, 1)
-                        try:
-                            await status_msg.edit_text(
-                                f"🔄 **Converting to AAC M4A...**\n"
-                                f"{bar}\n"
-                                f"⏱ {time_part} / "
-                                f"{int(duration_secs//3600):02}:"
-                                f"{int((duration_secs%3600)//60):02}:"
-                                f"{int(duration_secs%60):02}"
-                            )
-                        except:
-                            pass
-            except:
-                pass
-
-    await process.wait()
-    return process.returncode, b''.join(
-        [l.encode() for l in stderr_lines])
-
-# ==========================================
-# GET AUDIO DURATION USING FFPROBE
-# ==========================================
-async def get_duration(file_path):
-    try:
-        probe = await asyncio.create_subprocess_exec(
-            'ffprobe', '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            file_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL
-        )
-        stdout, _ = await probe.communicate()
-        return float(stdout.decode().strip())
-    except:
-        return 0
-
-# ==========================================
 # SETTINGS
 # ==========================================
-def get_user_settings(user_id):
+def get_settings(user_id):
     if user_id not in USER_SETTINGS:
         USER_SETTINGS[user_id] = {
             'bitrate': '320k',
@@ -173,17 +77,16 @@ def get_user_settings(user_id):
         }
     return USER_SETTINGS[user_id]
 
-def generate_markup(settings):
-    ac_label = "Stereo" if settings['ac'] == '2' else "Mono"
+def make_markup(s):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(
-            f"🎵 Bitrate: {settings['bitrate']}",
+            f"🎵 Bitrate: {s['bitrate']}",
             callback_data="toggle_bitrate")],
         [InlineKeyboardButton(
-            f"🎚 Sample Rate: {settings['ar']} Hz",
+            f"🎚 Sample Rate: {s['ar']} Hz",
             callback_data="toggle_ar")],
         [InlineKeyboardButton(
-            f"🔊 Channels: {ac_label}",
+            f"🔊 Channels: {'Stereo' if s['ac']=='2' else 'Mono'}",
             callback_data="toggle_ac")]
     ])
 
@@ -196,7 +99,7 @@ async def start_cmd(client, message):
         "👋 **Welcome to Audio Converter Bot!**\n\n"
         "🎵 Send any audio or video file\n"
         "⚡ Fast download + conversion\n"
-        "📊 Real-time progress bar\n"
+        "📊 Progress bar included\n"
         "📤 Get M4A back instantly\n\n"
         "📌 /help — How to use\n"
         "⚙️ /settings — Change quality"
@@ -206,189 +109,218 @@ async def start_cmd(client, message):
 async def help_cmd(client, message):
     await message.reply_text(
         "🛠 **How to use:**\n\n"
-        "1️⃣ Send or forward any audio/video file\n"
+        "1️⃣ Send or forward any audio/video\n"
         f"2️⃣ Supported: {', '.join(SUPPORTED_FORMATS).upper()}\n"
-        "3️⃣ Watch the real-time progress bar\n"
+        "3️⃣ Watch the progress bar\n"
         "4️⃣ Get your M4A file!\n\n"
-        "📦 Max file size: **2GB**\n"
-        "✅ 5.1 Surround → Clear Stereo fix included\n"
-        "⚙️ Use /settings to adjust quality"
+        "📦 Max: **2GB**\n"
+        "✅ 5.1 Surround → Clear Stereo\n"
+        "⚙️ /settings to adjust quality"
     )
 
 @app.on_message(filters.command("settings"))
 async def settings_cmd(client, message):
-    settings = get_user_settings(message.from_user.id)
     await message.reply_text(
-        "⚙️ **Conversion Settings**\nTap to change:",
-        reply_markup=generate_markup(settings)
+        "⚙️ **Settings** — Tap to change:",
+        reply_markup=make_markup(get_settings(message.from_user.id))
     )
 
 @app.on_callback_query(filters.regex("^toggle_"))
-async def settings_callback(client, callback_query):
-    user_id = callback_query.from_user.id
-    settings = get_user_settings(user_id)
-    action = callback_query.data
-
-    if action == "toggle_bitrate":
-        options = ['128k', '192k', '320k']
-        settings['bitrate'] = options[
-            (options.index(settings['bitrate']) + 1) % len(options)]
-    elif action == "toggle_ar":
-        options = ['44100', '48000']
-        settings['ar'] = options[
-            (options.index(settings['ar']) + 1) % len(options)]
-    elif action == "toggle_ac":
-        settings['ac'] = '1' if settings['ac'] == '2' else '2'
-
-    USER_SETTINGS[user_id] = settings
-    await callback_query.message.edit_reply_markup(
-        generate_markup(settings))
-    await callback_query.answer("✅ Setting updated!")
+async def toggle(client, cq):
+    s = get_settings(cq.from_user.id)
+    if cq.data == "toggle_bitrate":
+        opts = ['128k', '192k', '320k']
+        s['bitrate'] = opts[(opts.index(s['bitrate']) + 1) % 3]
+    elif cq.data == "toggle_ar":
+        opts = ['44100', '48000']
+        s['ar'] = opts[(opts.index(s['ar']) + 1) % 2]
+    elif cq.data == "toggle_ac":
+        s['ac'] = '1' if s['ac'] == '2' else '2'
+    USER_SETTINGS[cq.from_user.id] = s
+    await cq.message.edit_reply_markup(make_markup(s))
+    await cq.answer("✅ Updated!")
 
 # ==========================================
-# FILE HANDLING
+# CONVERSION PROGRESS READER
+# ==========================================
+async def run_ffmpeg_with_progress(cmd, duration, status_msg):
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE
+    )
+
+    last_update = 0
+    error_lines = []
+
+    while True:
+        line = await process.stderr.readline()
+        if not line:
+            break
+        line = line.decode('utf-8', errors='ignore').strip()
+        error_lines.append(line)
+
+        # Parse FFmpeg time= from stderr
+        if 'time=' in line and duration > 0:
+            try:
+                t = line.split('time=')[1].split(' ')[0]
+                h, m, s = t.split(':')
+                current = float(h)*3600 + float(m)*60 + float(s)
+                pct = min(int((current / duration) * 100), 99)
+                now = time.time()
+                if now - last_update >= 3:
+                    last_update = now
+                    elapsed = round(now - last_update, 1)
+                    cur_str = f"{int(float(h)):02}:{int(float(m)):02}:{int(float(s)):02}"
+                    dur_str = f"{int(duration//3600):02}:{int((duration%3600)//60):02}:{int(duration%60):02}"
+                    try:
+                        await status_msg.edit_text(
+                            f"🔄 **Converting to AAC M4A...**\n"
+                            f"[{make_bar(pct)}] {pct}%\n"
+                            f"⏱ {cur_str} / {dur_str}"
+                        )
+                    except:
+                        pass
+            except:
+                pass
+
+    await process.wait()
+    return process.returncode, '\n'.join(error_lines[-20:])
+
+# ==========================================
+# GET DURATION
+# ==========================================
+async def get_duration(path):
+    try:
+        p = await asyncio.create_subprocess_exec(
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        out, _ = await p.communicate()
+        return float(out.decode().strip())
+    except:
+        return 0
+
+# ==========================================
+# MAIN FILE HANDLER
 # ==========================================
 @app.on_message(filters.audio | filters.video | filters.document)
-async def handle_files(client, message):
+async def handle_file(client, message):
     file_obj = message.audio or message.video or message.document
-    file_name = getattr(file_obj, "file_name", "unknown_file")
+    file_name = getattr(file_obj, "file_name", "file")
     file_size = getattr(file_obj, "file_size", 0)
-    ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
+    ext = file_name.rsplit('.', 1)[-1].lower() if '.' in file_name else ''
 
     if ext not in SUPPORTED_FORMATS:
         await message.reply_text(
             "❌ **Unsupported format!**\n"
-            f"✅ Supported: {', '.join(SUPPORTED_FORMATS).upper()}"
-        )
+            f"✅ Supported: {', '.join(SUPPORTED_FORMATS).upper()}")
         return
 
     if file_size > MAX_FILE_SIZE:
-        await message.reply_text(
-            "❌ File too large! Max size is **2GB**.")
+        await message.reply_text("❌ Too large! Max **2GB**.")
         return
 
-    size_mb = round(file_size / (1024 * 1024), 1)
-    status_msg = await message.reply_text(
+    size_mb = round(file_size / 1024 / 1024, 1)
+    status = await message.reply_text(
         f"📥 **Downloading...**\n"
-        f"📦 File size: {size_mb} MB\n"
-        f"[░░░░░░░░░░] 0%"
+        f"[░░░░░░░░░░] 0%\n"
+        f"📦 {size_mb} MB"
     )
 
-    # Clean safe file paths
     safe_id = str(message.id)
-    input_path = f"/tmp/input_{safe_id}.{ext}"
-    output_path = f"/tmp/output_{safe_id}.m4a"
-    start_time = time.time()
+    inp = f"/tmp/input_{safe_id}.{ext}"
+    out = f"/tmp/output_{safe_id}.m4a"
+    t0 = time.time()
 
     try:
-        # ==========================================
-        # 1. DOWNLOAD WITH PROGRESS
-        # ==========================================
+        # 1. DOWNLOAD
         await message.download(
-            file_name=input_path,
+            file_name=inp,
             progress=progress,
-            progress_args=(status_msg, "📥 **Downloading...**")
+            progress_args=(status, "📥 **Downloading...**")
         )
+        dl_time = round(time.time() - t0, 1)
 
-        dl_time = round(time.time() - start_time, 1)
+        # 2. GET DURATION
+        duration = await get_duration(inp)
 
-        # Get audio duration for progress calculation
-        duration = await get_duration(input_path)
-
-        await status_msg.edit_text(
+        await status.edit_text(
             f"✅ Downloaded in {dl_time}s\n"
-            f"🔄 **Converting to AAC M4A...**\n"
+            f"🔄 **Converting...**\n"
             f"[░░░░░░░░░░] 0%\n"
             f"⏱ Starting..."
         )
 
-        # ==========================================
-        # 2. CONVERT WITH REAL PROGRESS BAR
-        # ==========================================
-        settings = get_user_settings(message.from_user.id)
-
-        command = [
+        # 3. CONVERT - NO -progress flag, reads stderr
+        s = get_settings(message.from_user.id)
+        cmd = [
             'ffmpeg', '-y',
-            '-i', input_path,
+            '-i', inp,
             '-threads', '4',
             '-c:a', 'aac',
-            '-b:a', settings['bitrate'],
+            '-b:a', s['bitrate'],
             '-ac', '2',
-            '-af', 'pan=stereo|FL=FC+0.707*FL'
-                   '+0.707*BL|FR=FC+0.707*FR+0.707*BR',
-            '-ar', settings['ar'],
+            '-af', 'pan=stereo|FL=FC+0.707*FL+0.707*BL|FR=FC+0.707*FR+0.707*BR',
+            '-ar', s['ar'],
             '-vn',
             '-movflags', '+faststart',
-            # Enable progress output
-            '-progress', 'pipe:1',
-            output_path
+            out
         ]
 
-        conv_start = time.time()
-        returncode, stderr = await convert_with_progress(
-            command, duration, status_msg)
+        ct0 = time.time()
+        rc, err = await run_ffmpeg_with_progress(cmd, duration, status)
 
-        if returncode != 0:
-            error_msg = stderr.decode('utf-8', errors='ignore')[-500:]
-            await status_msg.edit_text(
-                f"❌ **FFmpeg Error:**\n`{error_msg}`\n\n"
-                "Please try again."
-            )
+        if rc != 0:
+            await status.edit_text(
+                f"❌ **FFmpeg Error:**\n`{err[-300:]}`")
             return
 
-        conv_time = round(time.time() - conv_start, 1)
-        out_size = round(
-            os.path.getsize(output_path) / (1024 * 1024), 1)
+        conv_time = round(time.time() - ct0, 1)
+        out_mb = round(os.path.getsize(out) / 1024 / 1024, 1)
+        total_time = round(time.time() - t0, 1)
 
-        await status_msg.edit_text(
+        await status.edit_text(
             f"✅ Converted in {conv_time}s\n"
-            f"📦 Output: {out_size} MB\n"
             f"⬆️ **Uploading...**\n"
-            f"[░░░░░░░░░░] 0%"
+            f"[░░░░░░░░░░] 0%\n"
+            f"📦 {out_mb} MB"
         )
 
-        # ==========================================
-        # 3. UPLOAD WITH PROGRESS
-        # ==========================================
-        new_file_name = f"{os.path.splitext(file_name)[0]}.m4a"
-        total_time = round(time.time() - start_time, 1)
-
+        # 4. UPLOAD
         await message.reply_audio(
-            audio=output_path,
-            title=new_file_name,
+            audio=out,
+            title=file_name.rsplit('.', 1)[0] + '.m4a',
             caption=(
-                f"✅ **Converted Successfully!**\n\n"
-                f"🎵 Format: M4A (AAC)\n"
-                f"🎚 Bitrate: {settings['bitrate']}\n"
-                f"🔊 Channels: Stereo\n"
-                f"🎚 Sample Rate: {settings['ar']} Hz\n"
-                f"📦 Size: {out_size} MB\n"
-                f"⏱ Total time: {total_time}s"
+                f"✅ **Done!**\n\n"
+                f"🎵 AAC M4A\n"
+                f"🎚 {s['bitrate']} | {s['ar']} Hz | Stereo\n"
+                f"📦 {out_mb} MB\n"
+                f"⏱ {total_time}s total"
             ),
             progress=progress,
-            progress_args=(status_msg, "⬆️ **Uploading...**")
+            progress_args=(status, "⬆️ **Uploading...**")
         )
-        await status_msg.delete()
+        await status.delete()
 
     except Exception as e:
-        await status_msg.edit_text(
-            f"❌ **Error:** {str(e)}\n"
-            "Please try again."
-        )
+        await status.edit_text(f"❌ **Error:** {str(e)}")
 
     finally:
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        if os.path.exists(output_path):
-            os.remove(output_path)
-        last_update_time.pop(message.id, None)
+        for f in [inp, out]:
+            if os.path.exists(f):
+                os.remove(f)
+        last_update_time.pop(status.id, None)
 
 # ==========================================
-# BOT START
+# START
 # ==========================================
 if __name__ == '__main__':
-    health_thread = threading.Thread(
-        target=run_health_server, daemon=True)
-    health_thread.start()
-    print("🤖 Bot is starting...")
+    threading.Thread(
+        target=run_health_server, daemon=True).start()
+    print("🤖 Starting bot...")
     app.run()
