@@ -37,7 +37,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bot is running!")
     def log_message(self, format, *args):
-        pass  # Suppress server logs
+        pass
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
@@ -54,7 +54,6 @@ def make_progress_bar(current, total):
     bar = "█" * filled + "░" * (10 - filled)
     size_done = round(current / (1024 * 1024), 1)
     size_total = round(total / (1024 * 1024), 1)
-    speed = ""
     return f"[{bar}] {percent}%\n📦 {size_done} MB / {size_total} MB"
 
 last_update_time = {}
@@ -80,7 +79,7 @@ def get_user_settings(user_id):
     if user_id not in USER_SETTINGS:
         USER_SETTINGS[user_id] = {
             'bitrate': '320k',
-            'ar': '44100',
+            'ar': '48000',
             'ac': '2'
         }
     return USER_SETTINGS[user_id]
@@ -185,13 +184,15 @@ async def handle_files(client, message):
         f"[░░░░░░░░░░] 0%"
     )
 
-    input_path = f"input_{file_obj.file_id}.{ext}"
-    output_path = f"output_{file_obj.file_id}.m4a"
+    # ✅ FIXED - Use message.id for clean file path
+    safe_id = str(message.id)
+    input_path = f"/tmp/input_{safe_id}.{ext}"
+    output_path = f"/tmp/output_{safe_id}.m4a"
     start_time = time.time()
 
     try:
         # ==========================================
-        # 1. DOWNLOAD
+        # 1. DOWNLOAD WITH PROGRESS
         # ==========================================
         await message.download(
             file_name=input_path,
@@ -218,6 +219,7 @@ async def handle_files(client, message):
             '-c:a', 'aac',
             '-b:a', settings['bitrate'],
             '-ac', '2',
+            # ✅ 5.1 Surround voice fix
             '-af', 'pan=stereo|FL=FC+0.707*FL+0.707*BL|FR=FC+0.707*FR+0.707*BR',
             '-ar', settings['ar'],
             '-vn',
@@ -227,7 +229,7 @@ async def handle_files(client, message):
 
         conv_start = time.time()
 
-        # Capture FFmpeg error output for debugging
+        # Capture FFmpeg errors for debugging
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
@@ -236,12 +238,11 @@ async def handle_files(client, message):
         stdout, stderr = await process.communicate()
 
         if process.returncode != 0:
-            # Send exact FFmpeg error to user
             error_msg = stderr.decode()[-500:]
             await status_msg.edit_text(
                 f"❌ **FFmpeg Error:**\n"
                 f"`{error_msg}`\n\n"
-                "Try sending the file again."
+                "Please try again."
             )
             return
 
@@ -257,7 +258,7 @@ async def handle_files(client, message):
         )
 
         # ==========================================
-        # 3. UPLOAD
+        # 3. UPLOAD WITH PROGRESS
         # ==========================================
         new_file_name = f"{os.path.splitext(file_name)[0]}.m4a"
         total_time = round(time.time() - start_time, 1)
@@ -270,6 +271,7 @@ async def handle_files(client, message):
                 f"🎵 Format: M4A (AAC)\n"
                 f"🎚 Bitrate: {settings['bitrate']}\n"
                 f"🔊 Channels: Stereo\n"
+                f"🎚 Sample Rate: {settings['ar']} Hz\n"
                 f"📦 Size: {out_size} MB\n"
                 f"⏱ Total time: {total_time}s"
             ),
@@ -295,7 +297,7 @@ async def handle_files(client, message):
 # BOT START
 # ==========================================
 if __name__ == '__main__':
-    # Start health server in background thread
+    # Start Render health check server
     health_thread = threading.Thread(
         target=run_health_server, daemon=True)
     health_thread.start()
