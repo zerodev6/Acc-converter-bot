@@ -9,7 +9,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 # ==========================================
 # CONFIGURATION
 # ==========================================
-API_ID = "20288994"
+API_ID = "20288994" # REMINDER: Keep these secret in production!
 API_HASH = "d702614912f1ad370a0d18786002adbf"
 BOT_TOKEN = "8610998423:AAGAneW7hmfW8kUP_FUCXjjb_jl5_BQXUQA"
 
@@ -27,6 +27,9 @@ SUPPORTED_FORMATS = [
 ]
 USER_SETTINGS = {}
 last_update_time = {}
+
+# Track bot uptime
+START_TIME = time.time()
 
 # ==========================================
 # HEALTH SERVER FOR RENDER
@@ -69,7 +72,7 @@ async def progress(current, total, status_msg, action):
         pass
 
 # ==========================================
-# SETTINGS
+# SETTINGS & UI
 # ==========================================
 def get_settings(user_id):
     if user_id not in USER_SETTINGS:
@@ -105,7 +108,8 @@ async def start_cmd(client, message):
         "📊 Real progress bar\n"
         "📤 Get M4A back instantly\n\n"
         "📌 /help — How to use\n"
-        "⚙️ /settings — Change quality"
+        "⚙️ /settings — Change quality\n"
+        "🏓 /ping — Check bot latency"
     )
 
 @app.on_message(filters.command("help"))
@@ -118,6 +122,7 @@ async def help_cmd(client, message):
         "4️⃣ Get your M4A file!\n\n"
         "📦 Max: **2GB**\n"
         "✅ 5.1 Surround → Clear Stereo\n"
+        "🏷️ Original Metadata Retained\n"
         "⚙️ /settings to adjust quality"
     )
 
@@ -127,6 +132,21 @@ async def settings_cmd(client, message):
         "⚙️ **Settings** — Tap to change:",
         reply_markup=make_markup(get_settings(message.from_user.id))
     )
+
+@app.on_message(filters.command("ping"))
+async def ping_cmd(client, message):
+    start_t = time.time()
+    msg = await message.reply_text("🏓 Ponging...")
+    end_t = time.time()
+    await msg.edit_text(f"🏓 **Pong!**\n⚡ Latency: `{round((end_t - start_t) * 1000)}ms`")
+
+@app.on_message(filters.command("stats"))
+async def stats_cmd(client, message):
+    uptime_seconds = int(time.time() - START_TIME)
+    h = uptime_seconds // 3600
+    m = (uptime_seconds % 3600) // 60
+    s = uptime_seconds % 60
+    await message.reply_text(f"🤖 **Bot Stats**\n\n⏱ **Uptime:** `{h}h {m}m {s}s`\n🚀 **Status:** Online & Optimized")
 
 @app.on_callback_query(filters.regex("^toggle_"))
 async def toggle(client, cq):
@@ -177,14 +197,12 @@ async def run_ffmpeg_with_progress(cmd, duration, status_msg):
 
     while True:
         try:
-            # Read small chunks - fixes separator error
             chunk = await process.stdout.read(512)
             if not chunk:
                 break
 
             buffer += chunk.decode('utf-8', errors='ignore')
 
-            # FFmpeg uses \r not \n for progress
             while '\r' in buffer or '\n' in buffer:
                 sep = '\r' if '\r' in buffer else '\n'
                 line, buffer = buffer.split(sep, 1)
@@ -194,7 +212,6 @@ async def run_ffmpeg_with_progress(cmd, duration, status_msg):
 
                 error_lines.append(line)
 
-                # Parse time= for real progress
                 if 'time=' in line and duration > 0:
                     try:
                         t = line.split('time=')[1].split(' ')[0]
@@ -283,7 +300,6 @@ async def handle_file(client, message):
         )
         dl_time = round(time.time() - t0, 1)
 
-        # Get duration for progress calculation
         duration = await get_duration(inp)
 
         await status.edit_text(
@@ -294,18 +310,18 @@ async def handle_file(client, message):
         )
 
         # ==========================================
-        # 2. CONVERT WITH REAL PROGRESS
+        # 2. CONVERT WITH REAL PROGRESS (OPTIMIZED)
         # ==========================================
         s = get_settings(message.from_user.id)
 
         cmd = [
             'ffmpeg', '-y',
+            '-hwaccel', 'auto',  # [OPTIMIZATION] Try hardware decoding
             '-i', inp,
-            '-threads', '4',
+            '-threads', '0',     # [OPTIMIZATION] Use all CPU cores (was 4)
             '-c:a', 'aac',
             '-b:a', s['bitrate'],
             '-ac', '2',
-            # Fix 5.1 voice loss
             '-af', (
                 'pan=stereo|'
                 'FL=FC+0.707*FL+0.707*BL|'
@@ -313,6 +329,7 @@ async def handle_file(client, message):
             ),
             '-ar', s['ar'],
             '-vn',
+            '-map_metadata', '0', # [FEATURE] Retain original audio tags
             '-movflags', '+faststart',
             out
         ]
@@ -377,5 +394,5 @@ async def handle_file(client, message):
 if __name__ == '__main__':
     threading.Thread(
         target=run_health_server, daemon=True).start()
-    print("🤖 Bot starting...")
+    print("🤖 Bot starting... (Optimized Mode)")
     app.run()
